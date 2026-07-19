@@ -20,4 +20,17 @@ export async function startCheckout(plan, session) {
   if (url) window.location.href = url
 }
 
-// TODO: fetchEntitlement(session) -> does this user have access / credits?
+// Ask the backend whether this user has active access / credits.
+// Returns { hasAccess: boolean, plans: [...], credits: number } or a
+// safe default if the call fails, so callers never crash on network hiccups.
+export async function fetchEntitlement(session) {
+  try {
+    const res = await fetch(`${API_BASE}/api/entitlement`, {
+      headers: authHeaders(session),
+    })
+    if (!res.ok) return { hasAccess: false, plans: [], credits: 0 }
+    return await res.json()
+  } catch {
+    return { hasAccess: false, plans: [], credits: 0 }
+  }
+}

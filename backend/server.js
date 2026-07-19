@@ -1,41 +1,55 @@
 // Vieques AI — backend API (gatekeeper between frontend and Postgres/Claude)
+import './env.js'   // MUST be first — loads .env before any module reads process.env
 import express from 'express'
 import cors from 'cors'
 import pg from 'pg'
-import dotenv from 'dotenv'
-import Stripe from 'stripe'
 import Anthropic from '@anthropic-ai/sdk'
 import { TOOLS, runTool } from './aiTools.js'
-
-dotenv.config()
-
-// --- Stripe ---
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
-const APP_URL = process.env.APP_URL || 'http://localhost:5173'
+import { createCheckoutSession, handleWebhook, getEntitlement } from './payments.js'
 
 // --- Claude AI ---
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' })
 
-// Plans defined server-side so the browser can never change the price.
-const PLANS = {
-  traveler: { name: 'Traveler Plan', amount: 900, mode: 'payment', description: 'Full island access for your trip' },
-  credits:  { name: 'Credit Pack',   amount: 300, mode: 'payment', description: 'Pay-as-you-go AI queries' },
-  business_basic:    { name: 'Basic Plan', amount: 2900, mode: 'subscription', description: 'Get your business on the map', interval: 'month' },
-  business_featured: { name: 'Featured',   amount: 7900, mode: 'subscription', description: 'Priority placement', interval: 'month' },
-}
-
-
 const app = express()
-app.use(cors())            // allow the frontend dev server to call this
-app.use(express.json())
 
-const pool = new pg.Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'vieques_ai',
-  user: process.env.DB_USER || 'vieques_app',
-  password: process.env.DB_PASSWORD || '',
-})
+// --- Postgres pool (defined early so the webhook route can use it) ---
+const pool = new pg.Pool(
+  process.env.DATABASE_URL
+    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    : {
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 5432,
+        database: process.env.DB_NAME || 'vieques_ai',
+        user: process.env.DB_USER || 'vieques_app',
+        password: process.env.DB_PASSWORD || '',
+      }
+)
+
+// --- CORS: allow only known origins in prod, localhost in dev ---
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  process.env.LANDING_URL,   // e.g. https://explorevieques.org
+  process.env.APP_URL,       // e.g. https://app.explorevieques.org
+].filter(Boolean)
+
+app.use(cors({
+  origin(origin, cb) {
+    // allow same-origin / curl (no origin header) and any listed origin
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+    cb(new Error(`CORS: origin ${origin} not allowed`))
+  },
+}))
+
+// --- Stripe webhook MUST be registered with the raw body, BEFORE express.json(),
+//     or signature verification will always fail. ---
+app.post('/api/stripe/webhook',
+  express.raw({ type: 'application/json' }),
+  (req, res) => handleWebhook(pool, req, res)
+)
+
+// every other route parses JSON normally
+app.use(express.json())
 
 // Health check
 app.get('/api/health', async (_req, res) => {
@@ -213,33 +227,11 @@ app.get('/api/services/:slug', async (req, res) => {
 })
 
 
-// Create a Stripe Checkout session for a plan
-app.post('/api/checkout', async (req, res) => {
-  try {
-    const plan = PLANS[req.body?.plan]
-    if (!plan) return res.status(400).json({ error: 'Unknown plan' })
+// Create a Stripe Checkout session for a plan (logic in payments.js)
+app.post('/api/checkout', (req, res) => createCheckoutSession(pool, req, res))
 
-    const price_data = {
-      currency: 'usd',
-      product_data: { name: plan.name, description: plan.description },
-      unit_amount: plan.amount,
-    }
-    if (plan.mode === 'subscription') {
-      price_data.recurring = { interval: plan.interval || 'month' }
-    }
-
-    const session = await stripe.checkout.sessions.create({
-      mode: plan.mode,
-      line_items: [{ price_data, quantity: 1 }],
-      success_url: `${APP_URL}/?checkout=success`,
-      cancel_url: `${APP_URL}/?checkout=cancel`,
-    })
-
-    res.json({ url: session.url })
-  } catch (e) {
-    res.status(500).json({ error: e.message })
-  }
-})
+// Does the signed-in user have active access / credits?
+app.get('/api/entitlement', (req, res) => getEntitlement(pool, req, res))
 
 
 // Transportation categories for the sidebar

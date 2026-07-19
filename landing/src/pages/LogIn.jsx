@@ -1,6 +1,10 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { signIn } from '../lib/supabase.js'
+import { fetchEntitlement } from '../lib/api.js'
+
+// Where the map app lives (same env var Success.jsx uses).
+const APP_URL = import.meta.env.VITE_APP_URL || 'http://localhost:5173'
 
 export default function LogIn() {
   const navigate = useNavigate()
@@ -33,7 +37,14 @@ export default function LogIn() {
     }
 
     if (data?.session) {
-      navigate('/account')
+      // Logged in — now ask the backend whether they've PAID.
+      // Paid users go straight to the map; everyone else to pricing.
+      const ent = await fetchEntitlement(data.session)
+      if (ent.hasAccess) {
+        window.location.href = APP_URL   // full redirect into the map app
+      } else {
+        navigate('/pricing')
+      }
     } else {
       // No session but no error usually means email not confirmed.
       setStatus('error')
