@@ -1,0 +1,21 @@
+USED FO RMAKING AMIGRATION TO THE DATABASE AFTER ADDING A FEATURE 
+
+cp ~/Downloads/0006_snorkel_tours.sql ~/Desktop/Vieques\ AI/db/migrations/
+
+
+cd ~/Desktop/Vieques\ AI/db/scripts
+bash 03_migrate.sh
+
+./start_app.sh
+
+git config --global user.email "explorevieques@proton.me"
+
+git config --global user.name "explorevieques"
+//APP_URL=http://localhost:5173
+// VITE_API_BASE=http://192.168.88.6:3001
+
+LUU04xMpMFSmpZnH
+
+psql "postgresql://postgres.dbotrrrbqwgzccuiylef:LUU04xMpMFSmpZnH@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+
+hostname -I | awk '{print $1}'
