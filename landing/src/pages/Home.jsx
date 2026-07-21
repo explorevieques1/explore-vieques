@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import NavBar from '../components/NavBar.jsx'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -37,15 +38,7 @@ export default function Home() {
   return (
     <>
       {/* ================= NAV ================= */}
-      <nav className="nav">
-        <a href="#top" className="brand">Explore<span> Vieques</span></a>
-        <div className="nav-links">
-          <a href="#features">Features</a>
-          <a href="#how">How it works</a>
-          <a href="#pricing">Pricing</a>
-          <Link to="/signup" className="btn btn-primary">Get access</Link>
-        </div>
-      </nav>
+      <NavBar />
 
       {/* ================= HERO ================= */}
       <header id="top" className="hero">
@@ -118,7 +111,7 @@ export default function Home() {
       </section>
 
       {/* ================= FEATURES ================= */}
-      <section id="features" className="section" style={{ background: 'var(--bg)' }}>
+      <section id="features" className="section section-alt">
         <div className="feature-lead center reveal">
           <span className="eyebrow">Features</span>
           <h2>The whole island, one map</h2>
@@ -184,7 +177,7 @@ export default function Home() {
       </section>
 
       {/* ================= PRICING ================= */}
-      <section id="pricing" className="section" style={{ background: 'var(--bg)' }}>
+      <section id="pricing" className="section section-alt">
         <div className="feature-lead center reveal">
           <span className="eyebrow">Pricing</span>
           <h2>Simple pricing for your trip — or your business</h2>
