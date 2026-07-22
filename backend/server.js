@@ -26,6 +26,7 @@ const pool = new pg.Pool(
 )
 
 // --- CORS: allow only known origins in prod, localhost in dev ---
+const IS_PROD = process.env.NODE_ENV === 'production'
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -33,10 +34,15 @@ const ALLOWED_ORIGINS = [
   process.env.APP_URL,       // e.g. https://app.explorevieques.org
 ].filter(Boolean)
 
+// In dev, Vite may bump to the next free port (5175, 5176…) when 5174 is taken,
+// so allow ANY localhost/127.0.0.1 port. Never allowed in production.
+const isDevLocalhost = (origin) =>
+  !IS_PROD && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
+
 app.use(cors({
   origin(origin, cb) {
     // allow same-origin / curl (no origin header) and any listed origin
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+    if (!origin || ALLOWED_ORIGINS.includes(origin) || isDevLocalhost(origin)) return cb(null, true)
     cb(new Error(`CORS: origin ${origin} not allowed`))
   },
 }))
