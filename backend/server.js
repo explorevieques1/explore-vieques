@@ -1,4 +1,34 @@
-// Vieques AI — backend API (gatekeeper between frontend and Postgres/Claude)
+// ============================================================================
+//  Explore Vieques — Backend API server
+// ============================================================================
+//
+//  This is the ONLY process that talks to Postgres, Stripe, and Claude. The
+//  browser (landing + map app) never touches those directly — every request
+//  funnels through this "gatekeeper." That keeps secret keys server-side and
+//  lets Row Level Security protect the identity/payment tables.
+//
+//  WHAT LIVES HERE
+//  ---------------
+//    • CORS policy          — who is allowed to call this API
+//    • Postgres pool         — the single shared DB connection pool
+//    • Stripe webhook mount   — raw-body route, registered before express.json()
+//    • Content routes         — beaches, restaurants, activities, transport,
+//                               services, essentials, snorkel spots (read-only)
+//    • Payment routes         — /api/checkout, /api/entitlement (see payments.js)
+//    • AI chat route          — /api/ai/chat, a Claude tool-use loop (see aiTools.js)
+//    • Directions route       — /api/directions, fuzzy place match + OSRM routing
+//
+//  RUNTIME / DEPLOYMENT (Railway)
+//  ------------------------------
+//    • Started with `npm start` → `node server.js` (see package.json).
+//    • Listens on process.env.PORT (Railway injects it) or 3001 locally.
+//    • Binds 0.0.0.0 so the container's health check can reach it.
+//    • Health check: GET /api/health  (configured in backend/railway.json).
+//    • Set NODE_ENV=production on the host — it tightens the CORS rule below.
+//
+//  See CLAUDE.md → "Deploy the backend to Railway" for the full runbook.
+// ============================================================================
+
 import './env.js'   // MUST be first — loads .env before any module reads process.env
 import express from 'express'
 import cors from 'cors'
@@ -7,16 +37,41 @@ import Anthropic from '@anthropic-ai/sdk'
 import { TOOLS, runTool } from './aiTools.js'
 import { createCheckoutSession, handleWebhook, getEntitlement } from './payments.js'
 
-// --- Claude AI ---
+// ----------------------------------------------------------------------------
+//  Third-party clients & app instance
+// ----------------------------------------------------------------------------
+
+// Claude client. The API key stays server-side; the browser never sees it.
+// Falls back to '' so the process still boots if the key is missing — the AI
+// route will fail per-request rather than crashing the whole server on start.
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || '' })
 
 const app = express()
 
-// --- Postgres pool (defined early so the webhook route can use it) ---
+// ----------------------------------------------------------------------------
+//  Postgres connection pool
+// ----------------------------------------------------------------------------
+//  Defined early so the Stripe webhook route (registered below) can capture it.
+//
+//  Two shapes:
+//    1. DATABASE_URL set  → Supabase transaction pooler (production path).
+//    2. DATABASE_URL unset → discrete DB_* fields (local Postgres fallback).
+// ----------------------------------------------------------------------------
 const pool = new pg.Pool(
   process.env.DATABASE_URL
-    ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }
+    ? {
+        connectionString: process.env.DATABASE_URL,
+        // Supabase terminates SSL at the pooler with a cert Node won't verify
+        // by default; disabling verification is the documented, expected setup.
+        ssl: { rejectUnauthorized: false },
+        // GOTCHA (do not remove): Supabase's transaction pooler starts every
+        // session with an EMPTY search_path, so unqualified names like
+        // `FROM beaches` fail intermittently with `relation ... does not exist`.
+        // Pinning search_path=public on connect fixes it for good.
+        options: '-c search_path=public',
+      }
     : {
+        // Local Postgres fallback (only when DATABASE_URL is unset).
         host: process.env.DB_HOST || 'localhost',
         port: process.env.DB_PORT || 5432,
         database: process.env.DB_NAME || 'vieques_ai',
@@ -25,8 +80,20 @@ const pool = new pg.Pool(
       }
 )
 
-// --- CORS: allow only known origins in prod, localhost in dev ---
+// ----------------------------------------------------------------------------
+//  CORS — who is allowed to call this API
+// ----------------------------------------------------------------------------
+//  Production: only the exact landing + app origins (plus localhost, harmless).
+//  Development: any localhost port, because Vite bumps 5174→5175→5176… when a
+//  port is busy and we don't want that to silently break local requests.
+//
+//  IMPORTANT: the dev-only "any localhost" escape hatch is gated on NODE_ENV.
+//  Setting NODE_ENV=production on the deploy host disables it — do not skip it.
+// ----------------------------------------------------------------------------
 const IS_PROD = process.env.NODE_ENV === 'production'
+
+// Explicit allowlist. `.filter(Boolean)` drops LANDING_URL/APP_URL when unset
+// so we never accidentally allow the string "undefined" as an origin.
 const ALLOWED_ORIGINS = [
   'http://localhost:5173',
   'http://localhost:5174',
@@ -34,30 +101,44 @@ const ALLOWED_ORIGINS = [
   process.env.APP_URL,       // e.g. https://app.explorevieques.org
 ].filter(Boolean)
 
-// In dev, Vite may bump to the next free port (5175, 5176…) when 5174 is taken,
-// so allow ANY localhost/127.0.0.1 port. Never allowed in production.
+// Dev-only: match any http://localhost:PORT or http://127.0.0.1:PORT origin.
+// Returns false in production regardless of the URL shape.
 const isDevLocalhost = (origin) =>
   !IS_PROD && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
 
 app.use(cors({
   origin(origin, cb) {
-    // allow same-origin / curl (no origin header) and any listed origin
+    // No origin header = same-origin request or a tool like curl → allow it.
+    // Otherwise the origin must be on the allowlist (or a dev localhost port).
     if (!origin || ALLOWED_ORIGINS.includes(origin) || isDevLocalhost(origin)) return cb(null, true)
     cb(new Error(`CORS: origin ${origin} not allowed`))
   },
 }))
 
-// --- Stripe webhook MUST be registered with the raw body, BEFORE express.json(),
-//     or signature verification will always fail. ---
+// ----------------------------------------------------------------------------
+//  Stripe webhook — MUST be mounted BEFORE express.json()
+// ----------------------------------------------------------------------------
+//  Stripe signs the RAW request body. If express.json() parses it first, the
+//  bytes change and signature verification fails 100% of the time. So this one
+//  route uses express.raw() to keep the untouched Buffer. All fulfillment logic
+//  (granting access/credits) lives in payments.js → handleWebhook().
+// ----------------------------------------------------------------------------
 app.post('/api/stripe/webhook',
   express.raw({ type: 'application/json' }),
   (req, res) => handleWebhook(pool, req, res)
 )
 
-// every other route parses JSON normally
+// From here down, every route parses its body as JSON.
 app.use(express.json())
 
-// Health check
+// ----------------------------------------------------------------------------
+//  Health check — GET /api/health
+// ----------------------------------------------------------------------------
+//  Railway pings this after each deploy (railway.json → healthcheckPath). We
+//  run a trivial `SELECT 1` so a green health check also proves the database
+//  connection is live, not just that the process is up. Returns 500 if the DB
+//  is unreachable, which tells Railway the deploy is unhealthy.
+// ----------------------------------------------------------------------------
 app.get('/api/health', async (_req, res) => {
   try {
     await pool.query('SELECT 1')
@@ -66,6 +147,12 @@ app.get('/api/health', async (_req, res) => {
     res.status(500).json({ ok: false, error: e.message })
   }
 })
+
+// ============================================================================
+//  CONTENT ROUTES (read-only map data)
+//  Everything below serves public map content from Supabase. No auth needed —
+//  the paywall is enforced in the map app's AccessGate, not on these reads.
+// ============================================================================
 
 // All active beaches, shaped for the map + popup.
 // Optional query filters:
@@ -233,10 +320,16 @@ app.get('/api/services/:slug', async (req, res) => {
 })
 
 
-// Create a Stripe Checkout session for a plan (logic in payments.js)
+// ============================================================================
+//  PAYMENT ROUTES  (implementation lives in payments.js)
+// ============================================================================
+
+// POST /api/checkout — start a Stripe Checkout session for the requested plan.
+// Requires a signed-in user (Bearer JWT); returns a hosted-checkout URL.
 app.post('/api/checkout', (req, res) => createCheckoutSession(pool, req, res))
 
-// Does the signed-in user have active access / credits?
+// GET /api/entitlement — the map app's paywall asks this "can this user in?"
+// Returns { hasAccess, plans, credits } for the signed-in user.
 app.get('/api/entitlement', (req, res) => getEntitlement(pool, req, res))
 
 
@@ -315,8 +408,24 @@ app.get('/api/restaurants/:slug', async (req, res) => {
 })
 
 
-// AI chat with tool use. Body: { messages: [{role, content}], }
-// Returns { reply: string, pins: [...] }
+// ============================================================================
+//  AI CHAT ROUTE — POST /api/ai/chat
+// ============================================================================
+//  A Claude tool-use loop: the model calls the search tools defined in
+//  aiTools.js, we run them against Postgres, feed the rows back, and repeat
+//  until Claude produces a final text answer. The places it looked up are
+//  returned as `pins` so the map app can drop them on the map.
+//
+//  Body:    { messages: [{ role, content }, ...] }
+//  Returns: { reply: string, pins: [{ id, name, kind, latitude, longitude }] }
+//
+//  DEPLOYMENT NOTE: this loop can take 10–60+ seconds, which is WHY the backend
+//  runs on an always-on host (Railway) instead of a serverless platform whose
+//  request timeout would cut it off. See CLAUDE.md.
+// ============================================================================
+
+// The system prompt keeps answers grounded in tool output and formatted for the
+// narrow mobile chat pane (no Markdown tables, short bulleted lists).
 const SYSTEM_PROMPT = `You are the Vieques AI assistant, a friendly local guide for the island of Vieques, Puerto Rico. Help visitors find beaches, restaurants, activities, and transportation.
 
 When a user asks about something, use the provided tools to look up real data from the database, then answer naturally and concisely based ONLY on what the tools return. Never invent places that the tools did not return. If a tool returns nothing, say you do not have that listed yet.
@@ -333,11 +442,12 @@ app.post('/api/ai/chat', async (req, res) => {
     const userMessages = Array.isArray(req.body?.messages) ? req.body.messages : []
     if (!userMessages.length) return res.status(400).json({ error: 'No messages' })
 
-    const messages = [...userMessages]
-    const allPins = []
-    let finalText = ''
+    const messages = [...userMessages]   // running transcript we extend each turn
+    const allPins = []                    // every place any tool surfaced
+    let finalText = ''                    // Claude's latest natural-language reply
 
-    // tool-use loop (cap iterations to avoid runaway)
+    // Tool-use loop. Capped at 5 turns so a misbehaving model can't spin
+    // forever racking up token cost or hanging the request.
     for (let i = 0; i < 5; i++) {
       const response = await anthropic.messages.create({
         model: 'claude-sonnet-4-6',
@@ -347,14 +457,17 @@ app.post('/api/ai/chat', async (req, res) => {
         messages,
       })
 
-      // collect any text
+      // Capture any prose Claude wrote this turn (kept as the reply if the
+      // model stops here).
       const textParts = response.content.filter((c) => c.type === 'text').map((c) => c.text)
       if (textParts.length) finalText = textParts.join('\n')
 
+      // No tool calls → Claude has finished reasoning; exit the loop.
       const toolUses = response.content.filter((c) => c.type === 'tool_use')
-      if (toolUses.length === 0) break // Claude is done
+      if (toolUses.length === 0) break
 
-      // run each requested tool, gather results + pins
+      // Echo the assistant turn back into the transcript, then run each tool and
+      // return its rows as tool_result messages so Claude can read them next turn.
       messages.push({ role: 'assistant', content: response.content })
       const toolResults = []
       for (const tu of toolUses) {
@@ -363,13 +476,14 @@ app.post('/api/ai/chat', async (req, res) => {
         toolResults.push({
           type: 'tool_result',
           tool_use_id: tu.id,
+          // Cap payload size so a huge result set can't blow the context window.
           content: JSON.stringify(listings).slice(0, 6000),
         })
       }
       messages.push({ role: 'user', content: toolResults })
     }
 
-    // de-dupe pins by id+kind
+    // De-dupe pins by "kind:id" so a place mentioned by two tools maps once.
     const seen = new Set()
     const pins = allPins.filter((p) => {
       const k = p.kind + ':' + p.id
@@ -386,8 +500,21 @@ app.post('/api/ai/chat', async (req, res) => {
 })
 
 
-// Resolve a typed place name to a listing+coords using fuzzy, accent-insensitive
-// matching across all mapped tables. Returns best match or null.
+// ============================================================================
+//  DIRECTIONS ROUTE — POST /api/directions
+// ============================================================================
+
+/**
+ * Resolve a free-typed place name to a real listing + coordinates.
+ *
+ * Searches every mapped table at once (beaches, restaurants, transport,
+ * services, activities) using pg_trgm `similarity()` over unaccented,
+ * lower-cased names — so "esperanza" matches "Esperanza" and "malecon"
+ * matches "Malecón". Requires similarity > 0.15 to count as a hit.
+ *
+ * @param {string} term  The name the user typed.
+ * @returns {Promise<{name, latitude, longitude, kind}|null>} Best match, or null.
+ */
 async function resolvePlace(term) {
   const { rows } = await pool.query(
     `WITH q AS (SELECT unaccent(lower($1)) AS t)
@@ -407,8 +534,9 @@ async function resolvePlace(term) {
   return rows[0] || null
 }
 
-// Directions: resolve two place names, fetch a road route from OSRM (free),
-// return the route geometry + distance/time + a Google Maps link.
+// POST /api/directions — turn two typed place names into a drivable route.
+// Resolves each name to coordinates, asks the free public OSRM router for a
+// driving route, and returns the geometry + distance/time + a Google Maps link.
 // Body: { from: string, to: string }
 app.post('/api/directions', async (req, res) => {
   try {
@@ -476,6 +604,15 @@ app.get('/api/essentials/:slug', async (req, res) => {
   }
 })
 
+// ----------------------------------------------------------------------------
+//  Start the server
+// ----------------------------------------------------------------------------
+//  PORT comes from the host (Railway injects it) and falls back to 3001 locally
+//  — do NOT hardcode or set PORT in the deploy env. Binding 0.0.0.0 (not
+//  127.0.0.1) is required so the container's health check and public networking
+//  can reach the process, and it also makes the dev server reachable from other
+//  devices on your LAN.
+// ----------------------------------------------------------------------------
 const PORT = process.env.PORT || 3001
 app.listen(PORT, '0.0.0.0', () =>
   console.log(`API listening on http://0.0.0.0:${PORT} (reachable on your network IP too)`),

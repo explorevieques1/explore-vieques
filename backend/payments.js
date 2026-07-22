@@ -1,23 +1,67 @@
-// Payment engine for Vieques AI.
-// All Stripe secret-key work + webhook fulfillment lives here.
-// The browser never sees the secret key and can never grant itself access:
-// entitlements are written only by the webhook, over the direct pg connection
-// (which bypasses RLS because it connects as the DB user, not the anon key).
+// ============================================================================
+//  payments.js — Payment engine (Stripe + entitlement fulfillment)
+// ============================================================================
+//
+//  All Stripe secret-key work and webhook fulfillment lives here. Two rules
+//  make this the security backbone of the paywall:
+//
+//    1. The browser NEVER sees the Stripe secret key. It only ever gets a
+//       hosted-checkout URL back from /api/checkout.
+//    2. A user can NEVER grant themselves access. Entitlements (the
+//       `subscriptions` / `credit_transactions` rows) are written ONLY by the
+//       Stripe webhook — a server-to-server call Stripe signs. We write those
+//       rows over the direct `pg` pool, which connects as the database owner
+//       and therefore BYPASSES Row Level Security (unlike the anon key the
+//       browser uses).
+//
+//  REQUEST FLOW
+//  ------------
+//    Browser → POST /api/checkout ─────────────► Stripe Checkout (hosted page)
+//                                                       │  user pays
+//                                                       ▼
+//    Stripe → POST /api/stripe/webhook ──► handleWebhook() ──► fulfill()
+//                                                       │  writes the grant
+//                                                       ▼
+//    Browser → GET /api/entitlement ────────► getEntitlement() reads the grant
+//
+//  DEPLOYMENT NOTE: the webhook needs a stable, always-on public URL and the
+//  STRIPE_WEBHOOK_SECRET from the Stripe dashboard. See CLAUDE.md → Known gaps.
+// ============================================================================
 
 import Stripe from 'stripe'
 import { createClient } from '@supabase/supabase-js'
 
+// Server-side Stripe client. `|| ''` lets the process boot even if the key is
+// unset (individual requests fail instead of crashing on startup).
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
+
+// Where Stripe sends the browser back after checkout (success/cancel pages).
 const APP_URL = process.env.APP_URL || 'http://localhost:5173'
 
-// Supabase client used ONLY to verify a user's JWT (getUser).
-// Uses the anon key — verifying a token needs no elevated rights.
+// Supabase client used ONLY to verify a user's JWT (auth.getUser). The anon key
+// is enough — verifying a token needs no elevated privileges, and we never use
+// this client to read or write protected tables.
 const supabaseAuth = createClient(
   process.env.SUPABASE_URL || '',
   process.env.SUPABASE_ANON_KEY || ''
 )
 
-// Plans defined server-side so the browser can never change the price.
+// ----------------------------------------------------------------------------
+//  Plan catalog — the single source of truth for pricing
+// ----------------------------------------------------------------------------
+//  Defined server-side so the browser can never tamper with the price. The key
+//  (e.g. "traveler") is what the frontend sends to /api/checkout and what rides
+//  along in Stripe metadata to the webhook.
+//
+//  Field guide:
+//    amount   — price in CENTS (900 = $9.00).
+//    mode     — 'payment' (one-time) or 'subscription' (recurring).
+//    interval — billing period for subscriptions ('month').
+//    grants   — what fulfillment hands out on success:
+//                 { type: 'access',  days }   → time-boxed island access
+//                 { type: 'access' }          → open-ended (subscription-gated)
+//                 { type: 'credits', amount } → pay-as-you-go AI query credits
+// ----------------------------------------------------------------------------
 export const PLANS = {
   traveler:          { name: 'Traveler Plan', amount: 900,  mode: 'payment',      description: 'Full island access for your trip', grants: { type: 'access', days: 30 } },
   credits:           { name: 'Credit Pack',   amount: 300,  mode: 'payment',      description: 'Pay-as-you-go AI queries',         grants: { type: 'credits', amount: 20 } },
@@ -25,9 +69,17 @@ export const PLANS = {
   business_featured: { name: 'Featured',      amount: 7900, mode: 'subscription', description: 'Priority placement',           interval: 'month', grants: { type: 'access' } },
 }
 
-// --- Verify the Supabase JWT the frontend sends in the Authorization header ---
-// Returns { id, email } or null. Never trust userId/email from the body alone;
-// this is what ties a payment to a real, authenticated account.
+/**
+ * Verify the Supabase JWT the frontend sends in `Authorization: Bearer <jwt>`.
+ *
+ * This is the trust anchor for the whole payment flow: we NEVER take a user id
+ * or email from the request body, because a caller could forge those. Only a
+ * token Supabase can validate ties a payment to a real, authenticated account.
+ *
+ * @param {import('express').Request} req
+ * @returns {Promise<{ id: string, email: string }|null>} The user, or null if
+ *          the header is missing/invalid.
+ */
 export async function getUserFromAuthHeader(req) {
   const header = req.headers.authorization || ''
   const token = header.startsWith('Bearer ') ? header.slice(7) : null
@@ -37,7 +89,17 @@ export async function getUserFromAuthHeader(req) {
   return { id: data.user.id, email: data.user.email }
 }
 
-// --- Get or create the Stripe customer for a user, persisted in customers table ---
+/**
+ * Return the user's Stripe customer id, creating (and persisting) one if needed.
+ *
+ * Kept in the `customers` table so a returning buyer reuses the same Stripe
+ * customer — that keeps their payment history and subscriptions under one
+ * record instead of spawning a new customer on every checkout.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ id: string, email: string }} user
+ * @returns {Promise<string>} The Stripe customer id.
+ */
 async function resolveStripeCustomer(pool, user) {
   const { rows } = await pool.query(
     'SELECT stripe_customer_id FROM public.customers WHERE user_id = $1',
@@ -59,7 +121,18 @@ async function resolveStripeCustomer(pool, user) {
   return customer.id
 }
 
-// --- Create a Checkout session (called by POST /api/checkout) ---
+/**
+ * Create a Stripe Checkout session — handler for POST /api/checkout.
+ *
+ * Validates the plan, requires an authenticated user, resolves their Stripe
+ * customer, and builds a hosted Checkout session. The chosen plan + user id are
+ * stashed in `metadata` so the webhook knows WHO to grant WHAT after payment.
+ * Responds with `{ url }` for the browser to redirect to.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {import('express').Request} req   Body: { plan: keyof PLANS }
+ * @param {import('express').Response} res
+ */
 export async function createCheckoutSession(pool, req, res) {
   try {
     const plan = PLANS[req.body?.plan]
@@ -84,7 +157,8 @@ export async function createCheckoutSession(pool, req, res) {
       mode: plan.mode,
       customer: customerId,
       line_items: [{ price_data, quantity: 1 }],
-      // metadata travels to the webhook so we know who + what to grant.
+      // This metadata is the ONLY link between the payment and the account —
+      // the webhook reads it back to decide who gets access and to which plan.
       metadata: { supabase_user_id: user.id, plan: req.body.plan },
       success_url: `${APP_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${APP_URL}/pricing?checkout=cancel`,
@@ -97,11 +171,29 @@ export async function createCheckoutSession(pool, req, res) {
   }
 }
 
-// --- Webhook: the ONLY place access/credits get granted ---
-// Mounted with express.raw() so Stripe's signature can be verified.
+/**
+ * Stripe webhook handler — the ONLY place access/credits are ever granted.
+ *
+ * Mounted in server.js with express.raw() so `req.body` is the untouched Buffer
+ * Stripe signed. We first verify that signature (rejecting forgeries with 400),
+ * then act on the events we care about:
+ *
+ *   • checkout.session.completed        → grant the purchased plan (fulfill()).
+ *   • customer.subscription.updated     → keep local subscription status in sync
+ *   • customer.subscription.deleted     →   (active / past_due / canceled).
+ *
+ * Always responds 2xx on success so Stripe stops retrying; 400/500 tells Stripe
+ * to retry later.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {import('express').Request} req   Raw-body request from Stripe.
+ * @param {import('express').Response} res
+ */
 export async function handleWebhook(pool, req, res) {
   let event
   try {
+    // Verify authenticity: only Stripe knows STRIPE_WEBHOOK_SECRET, so a valid
+    // signature proves this event really came from Stripe (not a forged POST).
     event = stripe.webhooks.constructEvent(
       req.body, // raw Buffer, thanks to express.raw()
       req.headers['stripe-signature'],
@@ -113,6 +205,7 @@ export async function handleWebhook(pool, req, res) {
   }
 
   try {
+    // Payment completed → hand out whatever the plan promised.
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object
       const userId = session.metadata?.supabase_user_id
@@ -142,23 +235,38 @@ export async function handleWebhook(pool, req, res) {
   }
 }
 
-// Grant whatever the plan promised. Idempotent on stripe_session_id so
-// Stripe's automatic retries can't double-grant.
+/**
+ * Grant whatever a plan promised, inside a single DB transaction.
+ *
+ * IDEMPOTENT by design: Stripe delivers webhooks at-least-once (it retries on
+ * timeout), so we key on `stripe_session_id` and bail early if that session was
+ * already fulfilled — otherwise a retry would grant access twice or double the
+ * credits. Access plans write a `subscriptions` row (with an expiry for
+ * time-boxed plans); credit packs additionally write a `credit_transactions`
+ * row. Any failure rolls the whole thing back.
+ *
+ * @param {import('pg').Pool} pool
+ * @param {{ userId: string, planKey: string, plan: object, session: object }} ctx
+ */
 async function fulfill(pool, { userId, planKey, plan, session }) {
+  // Grab one dedicated connection so BEGIN/COMMIT stay on the same session.
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
 
-    // guard against duplicate delivery
+    // Duplicate-delivery guard: if this checkout session was already recorded,
+    // commit the no-op and return so retries don't double-grant.
     const dup = await client.query(
       'SELECT 1 FROM public.subscriptions WHERE stripe_session_id = $1',
       [session.id]
     )
     if (dup.rowCount > 0) { await client.query('COMMIT'); return }
 
+    // Time-boxed access (e.g. traveler = 30 days) gets an expiry; subscription
+    // access is open-ended (null) and governed by Stripe's subscription status.
     const expiresAt =
       plan.grants?.type === 'access' && plan.grants?.days
-        ? new Date(Date.now() + plan.grants.days * 86400_000)
+        ? new Date(Date.now() + plan.grants.days * 86400_000) // days → ms
         : null
 
     await client.query(
@@ -186,8 +294,18 @@ async function fulfill(pool, { userId, planKey, plan, session }) {
   }
 }
 
-// --- Entitlement check (called by GET /api/entitlement) ---
-// The app calls this to decide whether to let the user in.
+/**
+ * Entitlement check — handler for GET /api/entitlement.
+ *
+ * The map app's paywall calls this to decide whether to let the user in. Looks
+ * for any active, non-expired subscription plus the user's credit balance.
+ * Responds with:
+ *   { hasAccess: boolean, plans: [...activeRows], credits: number }
+ *
+ * @param {import('pg').Pool} pool
+ * @param {import('express').Request} req   Auth: Bearer JWT.
+ * @param {import('express').Response} res
+ */
 export async function getEntitlement(pool, req, res) {
   try {
     const user = await getUserFromAuthHeader(req)
