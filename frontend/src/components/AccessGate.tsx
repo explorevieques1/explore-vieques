@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { getSession } from '../lib/supabase'
+import { getSession, supabase } from '../lib/supabase'
 
 // Where the marketing/landing site lives (login + pricing).
 // Set VITE_LANDING_URL in frontend/.env (e.g. https://explorevieques.org).
@@ -26,7 +26,24 @@ export default function AccessGate({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false
 
+    // The landing site hands the session off in the URL hash (localStorage is
+    // per-origin, so it can't be read directly). Adopt those tokens, then strip
+    // them from the URL so they don't linger in history.
+    async function adoptSessionFromUrl() {
+      const hash = window.location.hash
+      if (hash.length < 2) return
+      const params = new URLSearchParams(hash.slice(1))
+      const access_token = params.get('access_token')
+      const refresh_token = params.get('refresh_token')
+      if (access_token && refresh_token) {
+        await supabase.auth.setSession({ access_token, refresh_token })
+        window.history.replaceState(null, '', window.location.pathname + window.location.search)
+      }
+    }
+
     async function check() {
+      await adoptSessionFromUrl()
+
       const { data } = await getSession()
       const token = data?.session?.access_token
 
