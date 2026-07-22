@@ -2,9 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { signIn } from '../lib/supabase.js'
 import { fetchEntitlement } from '../lib/api.js'
-
-// Where the map app lives (same env var Success.jsx uses).
-const APP_URL = import.meta.env.VITE_APP_URL || 'http://localhost:5173'
+import { mapUrlWithSession } from '../lib/mapApp.js'
 
 export default function LogIn() {
   const navigate = useNavigate()
@@ -41,7 +39,9 @@ export default function LogIn() {
       // Paid users go straight to the map; everyone else to pricing.
       const ent = await fetchEntitlement(data.session)
       if (ent.hasAccess) {
-        window.location.href = APP_URL   // full redirect into the map app
+        // Hand the session off in the URL so the map app (different origin)
+        // adopts it — otherwise it can't see we're logged in and loops back.
+        window.location.href = mapUrlWithSession(data.session)
       } else {
         navigate('/pricing')
       }

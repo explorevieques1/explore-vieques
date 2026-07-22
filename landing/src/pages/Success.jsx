@@ -1,10 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import { getSession } from '../lib/supabase.js'
+import { launchMapApp } from '../lib/mapApp.js'
 
-// Where the map app lives. Set VITE_APP_URL in the landing env
-// (e.g. https://app.explorevieques.org). Falls back to local dev.
-const APP_URL = import.meta.env.VITE_APP_URL || 'http://localhost:5173'
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001'
 
 const PLAN_LABELS = {
@@ -85,7 +83,7 @@ export default function Success() {
                 : 'Payment confirmed. Your island guide is ready.'}
             </p>
             <div style={styles.actions}>
-              <a href={APP_URL} style={styles.btnPrimary}>Launch App →</a>
+              <button onClick={launchMapApp} style={styles.btnPrimary}>Launch App →</button>
               <Link to="/" style={styles.btnGhost}>Return Home</Link>
             </div>
           </>
@@ -100,7 +98,7 @@ export default function Success() {
               launch the app now, or refresh this page shortly.
             </p>
             <div style={styles.actions}>
-              <a href={APP_URL} style={styles.btnPrimary}>Launch App →</a>
+              <button onClick={launchMapApp} style={styles.btnPrimary}>Launch App →</button>
               <button onClick={() => window.location.reload()} style={styles.btnGhost}>Refresh</button>
             </div>
           </>

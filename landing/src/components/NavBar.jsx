@@ -1,9 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { getSession, signOut, supabase } from '../lib/supabase.js'
-
-// Where the map app lives (same var the LogIn/Success pages already use).
-const APP_URL = import.meta.env.VITE_APP_URL || 'http://localhost:5173'
+import { mapUrlWithSession, launchMapApp } from '../lib/mapApp.js'
 
 // Redesigned landing banner: EV brand tile, centered links, Launch App
 // button, and a profile dropdown reflecting the real Supabase session.
@@ -20,9 +18,10 @@ export default function NavBar() {
     return () => { active = false; sub.subscription.unsubscribe() }
   }, [])
 
-  // Signed in -> open the map app. Not signed in -> start the traveler flow.
+  // Signed in -> open the map app (handing off the session). Not signed in ->
+  // start the traveler flow.
   function launchApp() {
-    if (session) { window.location.href = APP_URL; return }
+    if (session) { launchMapApp(); return }
     try { sessionStorage.setItem('vq_plan', 'traveler') } catch (_) {}
     navigate('/signup?plan=traveler')
   }
@@ -89,7 +88,7 @@ function ProfileCard({ session, onLogout }) {
                 </div>
               </div>
               <Link to="/account" className="profile-item" onClick={() => setOpen(false)}>⚙️ Account settings</Link>
-              <a href={APP_URL} className="profile-item">🗺️ Open the map</a>
+              <a href={mapUrlWithSession(session)} className="profile-item">🗺️ Open the map</a>
               <div className="profile-div" />
               <button className="profile-item" onClick={() => { setOpen(false); onLogout() }}>↩️ Sign out</button>
             </>
