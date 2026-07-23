@@ -9,6 +9,7 @@ type Props = {
   fetchItems: () => Promise<Item[]>
   activeSlug: string | null
   onSelect: (slug: string) => void
+  onClose: () => void
 }
 
 function CategoryListSidebar({
@@ -18,6 +19,7 @@ function CategoryListSidebar({
   fetchItems,
   activeSlug,
   onSelect,
+  onClose,
 }: Props) {
   const [items, setItems] = useState<Item[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -37,9 +39,18 @@ function CategoryListSidebar({
   const shown = q ? items.filter((c) => c.label.toLowerCase().includes(q)) : items
 
   return (
-    <aside className="absolute top-0 left-0 h-full w-60 z-20 bg-slate-900/95 backdrop-blur border-r border-slate-700 shadow-2xl flex flex-col">
+    <aside className="absolute top-0 left-0 h-full w-full sm:w-60 z-20 bg-slate-900/95 backdrop-blur border-r border-slate-700 shadow-2xl flex flex-col">
       <div className="px-4 py-3 border-b border-slate-800">
-        <h2 className="text-sm font-semibold text-white">{title}</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white">{title}</h2>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white text-xl leading-none px-2 -mr-2"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
         <p className="text-xs text-slate-400 mb-2">{subtitle}</p>
         <input
           value={query}

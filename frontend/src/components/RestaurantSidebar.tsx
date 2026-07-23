@@ -4,9 +4,10 @@ import { fetchRestaurantCategories, type RestaurantCategory } from '../lib/api'
 type Props = {
   activeSlug: string | null
   onSelect: (slug: string) => void
+  onClose: () => void
 }
 
-function RestaurantSidebar({ activeSlug, onSelect }: Props) {
+function RestaurantSidebar({ activeSlug, onSelect, onClose }: Props) {
   const [categories, setCategories] = useState<RestaurantCategory[]>([])
   const [error, setError] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -25,9 +26,18 @@ function RestaurantSidebar({ activeSlug, onSelect }: Props) {
   const shown = q ? categories.filter((c) => c.label.toLowerCase().includes(q)) : categories
 
   return (
-    <aside className="absolute top-0 left-0 h-full w-60 z-20 bg-slate-900/95 backdrop-blur border-r border-slate-700 shadow-2xl flex flex-col">
+    <aside className="absolute top-0 left-0 h-full w-full sm:w-60 z-20 bg-slate-900/95 backdrop-blur border-r border-slate-700 shadow-2xl flex flex-col">
       <div className="px-4 py-3 border-b border-slate-800">
-        <h2 className="text-sm font-semibold text-white">Restaurants</h2>
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-white">Restaurants</h2>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-white text-xl leading-none px-2 -mr-2"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
         <p className="text-xs text-slate-400 mb-2">Pick a category to see places</p>
         <input
           value={query}

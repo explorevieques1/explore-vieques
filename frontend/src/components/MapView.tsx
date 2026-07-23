@@ -56,9 +56,10 @@ type Props = {
   aiPins?: AiPin[]
   route?: DirectionsResult | null
   onRoute?: (r: DirectionsResult | null) => void
+  onCloseCategory?: () => void
 }
 
-function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
+function MapView({ activeCategory, aiPins, route, onRoute, onCloseCategory }: Props) {
   const mapContainer = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const markersRef = useRef<maplibregl.Marker[]>([])
@@ -528,7 +529,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
       {/* Beach search — only on beaches, top-left, shifts right if a sidebar is open */}
       {beaches.length > 0 && (
         <div
-          className="absolute top-4 z-10 pointer-events-auto transition-all"
+          className={`absolute top-4 z-10 pointer-events-auto transition-all ${sidebarOpen ? 'max-sm:hidden' : ''}`}
           style={{ left: sidebarOpen ? '16.5rem' : '1rem' }}
         >
           <SearchBar items={beaches} onSelect={selectBeach} placeholder="Search beaches…" />
@@ -539,7 +540,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
       {activeCategory === 'beaches' && (
         <button
           onClick={() => setFilterOpen((v) => !v)}
-          className={`absolute z-20 px-4 py-2 text-sm rounded-full shadow-lg transition-colors ${
+          className={`absolute z-20 px-4 py-2 text-sm rounded-full shadow-lg transition-colors ${sidebarOpen ? 'max-sm:hidden' : ''} ${
             filterOpen || Object.keys(beachFilters).length > 0
               ? 'bg-cyan-500 text-slate-900 font-medium'
               : 'bg-slate-900/85 backdrop-blur border border-slate-700 text-slate-200 hover:bg-slate-700'
@@ -561,7 +562,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
       {/* Style switcher — top-left area, clear of the top-right zoom controls,
           shifts right when the activities sidebar is open */}
       <div
-        className="absolute top-4 z-10 flex gap-1 rounded-lg bg-slate-900/80 p-1 backdrop-blur border border-slate-700 shadow-lg transition-all"
+        className={`absolute top-4 z-10 flex gap-1 rounded-lg bg-slate-900/80 p-1 backdrop-blur border border-slate-700 shadow-lg transition-all ${sidebarOpen ? 'max-sm:hidden' : ''}`}
         style={{
           left: sidebarOpen ? '16.5rem' : beaches.length > 0 ? '21rem' : '1rem',
         }}
@@ -590,17 +591,26 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
           fetchItems={fetchActivityCategories}
           activeSlug={activitySlug}
           onSelect={setActivitySlug}
+          onClose={() => onCloseCategory?.()}
         />
       )}
 
       {/* restaurants sidebar */}
       {activeCategory === 'restaurants' && (
-        <RestaurantSidebar activeSlug={restaurantSlug} onSelect={setRestaurantSlug} />
+        <RestaurantSidebar
+          activeSlug={restaurantSlug}
+          onSelect={setRestaurantSlug}
+          onClose={() => onCloseCategory?.()}
+        />
       )}
 
       {/* essentials sidebar */}
       {activeCategory === 'essentials' && (
-        <EssentialsSidebar activeSlug={essentialSlug} onSelect={setEssentialSlug} />
+        <EssentialsSidebar
+          activeSlug={essentialSlug}
+          onSelect={setEssentialSlug}
+          onClose={() => onCloseCategory?.()}
+        />
       )}
 
       {/* services sidebar */}
@@ -612,6 +622,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
           fetchItems={fetchServiceCategories}
           activeSlug={serviceSlug}
           onSelect={setServiceSlug}
+          onClose={() => onCloseCategory?.()}
         />
       )}
 
@@ -620,6 +631,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
         <TransportationSidebar
           activeSlug={transportSlug}
           onSelect={(slug) => setTransportSlug(slug)}
+          onClose={() => onCloseCategory?.()}
         />
       )}
 
@@ -641,7 +653,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
       {/* snorkel Go Yourself / Book a Tour toggle — only before zones are shown */}
       {activitySlug === 'snorkeling' && !zonesShown && (
         <div
-          className="absolute z-20 flex gap-1 rounded-lg bg-slate-900/85 backdrop-blur border border-slate-700 shadow-lg p-1"
+          className={`absolute z-20 flex gap-1 rounded-lg bg-slate-900/85 backdrop-blur border border-slate-700 shadow-lg p-1 ${sidebarOpen ? 'max-sm:hidden' : ''}`}
           style={{ top: '4rem', left: sidebarOpen ? '16.5rem' : '1rem' }}
         >
           <button
@@ -670,7 +682,7 @@ function MapView({ activeCategory, aiPins, route, onRoute }: Props) {
       {/* snorkel legend — sits under the style toggles, right of the sidebar */}
       {snorkelLegend.length > 0 && (
         <div
-          className="absolute z-20 w-64 rounded-lg bg-slate-900/90 backdrop-blur border border-slate-700 shadow-xl p-3"
+          className={`absolute z-20 w-64 rounded-lg bg-slate-900/90 backdrop-blur border border-slate-700 shadow-xl p-3 ${sidebarOpen ? 'max-sm:hidden' : ''}`}
           style={{ top: '4rem', left: sidebarOpen ? '16.5rem' : '1rem' }}
         >
           <div className="text-xs font-semibold text-white mb-2">Snorkel zones</div>

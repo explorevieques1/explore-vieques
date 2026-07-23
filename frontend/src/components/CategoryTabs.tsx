@@ -24,12 +24,12 @@ type Props = {
 
 function CategoryTabs({ active, onSelect }: Props) {
   return (
-    <nav className="flex gap-1">
+    <nav className="flex gap-1 w-max">
       {CATEGORIES.map((c) => (
         <button
           key={c.slug}
           onClick={() => onSelect(c.slug)}
-          className={`px-4 py-2 text-sm rounded-full transition-colors ${
+          className={`shrink-0 px-4 py-2 text-sm rounded-full transition-colors ${
             active === c.slug
               ? 'bg-cyan-500 text-slate-900 font-medium'
               : 'text-slate-300 hover:bg-slate-700'
